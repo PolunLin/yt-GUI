@@ -12,7 +12,8 @@ from apps.api.app.db.models.video import Video
 from apps.api.app.db.models.download_job import DownloadJob
 from apps.api.app.workers.queue import queue
 from apps.api.app.workers.tasks import download_task
-
+from rq.job import Job
+from rq.exceptions import NoSuchJobError
 router = APIRouter()
 
 
@@ -40,6 +41,16 @@ def create_download(payload: CreateDownloadReq, db: Session = Depends(get_db)):
     )
     existing = db.execute(stmt).scalars().first()
     if existing:
+        # ✅ 若 DB 有 queued/running 但 Redis 沒有這個 RQ job → 視為孤兒 job，補 enqueue
+        try:
+            Job.fetch(existing.job_id, connection=queue.connection)
+        except Exception:
+            existing.status = "queued"
+            existing.progress = 0
+            existing.updated_at = datetime.utcnow()
+            db.commit()
+            queue.enqueue(download_task, existing.job_id, video_id, job_id=existing.job_id)
+
         return {"job_id": existing.job_id, "status": existing.status}
 
     # 2) 若已有 success 且檔案存在 → 直接回傳（不再 enqueue）
@@ -69,26 +80,6 @@ def create_download(payload: CreateDownloadReq, db: Session = Depends(get_db)):
     queue.enqueue(download_task, job_id, video_id, job_id=job_id)
     return {"job_id": job_id, "status": "queued"}
 
-
-@router.get("/{job_id}")
-def get_download(job_id: str, db: Session = Depends(get_db)):
-    job = db.get(DownloadJob, job_id)
-    if not job:
-        raise HTTPException(404, "job not found")
-    return {
-        "job_id": job.job_id,
-        "video_id": job.video_id,
-        "status": job.status,
-        "progress": job.progress,
-        "output_path": job.output_path,
-        "error_message": job.error_message,
-        "started_at": job.started_at,
-        "finished_at": job.finished_at,
-        "created_at": job.created_at,
-        "updated_at": job.updated_at,
-    }
-from sqlalchemy import select
-
 @router.get("/by_video/{video_id}")
 def latest_job_by_video(video_id: str, db: Session = Depends(get_db)):
     stmt = (
@@ -112,6 +103,27 @@ def latest_job_by_video(video_id: str, db: Session = Depends(get_db)):
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
+
+
+@router.get("/{job_id}")
+def get_download(job_id: str, db: Session = Depends(get_db)):
+    job = db.get(DownloadJob, job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    return {
+        "job_id": job.job_id,
+        "video_id": job.video_id,
+        "status": job.status,
+        "progress": job.progress,
+        "output_path": job.output_path,
+        "error_message": job.error_message,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+from sqlalchemy import select
+
 
 # (3) 下載檔案 endpoint
 @router.get("/{job_id}/file")
