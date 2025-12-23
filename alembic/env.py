@@ -20,7 +20,7 @@ config.set_main_option("sqlalchemy.url", db_url)
 from apps.api.app.db.base import Base
 
 # Import models so they are registered on Base.metadata
-from apps.api.app.db.models import video, download_job, source  # noqa: F401
+from apps.api.app.db.models import video, download_job, source ,scan_job # noqa: F401
 
 target_metadata = Base.metadata
 

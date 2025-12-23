@@ -50,7 +50,7 @@ export default function App() {
   const [scanShorts, setScanShorts] = useState(true);
   const [scanVideos, setScanVideos] = useState(true);
   const [scanStreams, setScanStreams] = useState(false);
-  const [scanMaxItems, setScanMaxItems] = useState(30);
+  const [maxItems, setMaxItems] = useState<number>(30);
   // add-by-url
   const [url, setUrl] = useState("");
 
@@ -108,8 +108,7 @@ await syncJobsForVideos(data);
     if (!ch) return;
 
     try {
-      const max = Math.max(1, Math.min(500, scanMaxItems));
-
+      
     await api(`/sources/scan`, {
       method: "POST",
       body: JSON.stringify({
@@ -117,7 +116,7 @@ await syncJobsForVideos(data);
         include_shorts: scanShorts,
         include_videos: scanVideos,
         include_streams: scanStreams,
-        max_items: max,
+        max_items: Number(maxItems), // ✅,
       }),
     });
 
@@ -247,17 +246,15 @@ async function downloadFile(jobId: string, videoId: string) {
           Streams
         </label>
 
-              <input
-        type="number"
-        min={1}
-        step={1}
-        style={{ width: 110, padding: 10 }}
-        value={scanMaxItems}
-        onChange={(e) => {
-          const n = parseInt(e.target.value || "30", 10);
-          setScanMaxItems(Number.isFinite(n) && n > 0 ? n : 30);
-        }}
-      />
+              
+
+        <input
+          type="number"
+          min={1}
+          step={1}
+          value={maxItems}
+          onChange={(e) => setMaxItems(Number(e.target.value || 1))}
+        />
 
         <button style={{ padding: "10px 14px" }} onClick={scanChannel}>
           Scan

@@ -1,5 +1,7 @@
 import re
 from typing import Optional
+from uuid import uuid4
+from datetime import datetime
 
 import yt_dlp
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,7 +11,14 @@ from sqlalchemy import select
 
 from apps.api.app.db.session import get_db
 from apps.api.app.db.models.video import Video
-
+from apps.api.app.db.models.scan_job import ScanJob
+from apps.api.app.workers.queue import scan_queue
+from apps.api.app.workers.tasks import scan_task
+import os
+from datetime import datetime
+from uuid import uuid4
+from fastapi import HTTPException, Depends
+from sqlalchemy.orm import Session
 router = APIRouter()
 
 
@@ -53,10 +62,13 @@ def fetch_flat_entries(list_url: str, max_items: int) -> list[dict]:
         "js_runtimes": {"node": {}},
         "remote_components": ["ejs:github"],
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        data = ydl.extract_info(list_url, download=False)
-        entries = data.get("entries", []) if data else []
-        return entries[:max_items]
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            data = ydl.extract_info(url, download=False)
+            entries = data.get("entries", []) if data else []
+            return entries[:max_items]  # ✅ 強制 max 生效
+    except Exception:
+        return []   # ✅ 出錯就當這個分頁掃不到，不要 500
 
 
 def fetch_detail(video_url: str):
@@ -98,59 +110,76 @@ def upsert_video(db: Session, info: dict):
     v.is_short = is_short
 
 
+from pydantic import BaseModel, Field
+
+class ScanReq(BaseModel):
+    channel: str
+    include_shorts: bool = True
+    include_videos: bool = True
+    include_streams: bool = False
+    max_items: int = Field(default=30, ge=0)  # ✅ 允許 0
+
+
+SCAN_CAP = int(os.getenv("SCAN_CAP", "5000"))  # 你可自行調整
+
 @router.post("/scan")
-def scan_channel(payload: ScanChannelReq, db: Session = Depends(get_db)):
-    handle = normalize_channel_to_handle(payload.channel)
-    base = f"https://www.youtube.com/@{handle}"
+def create_scan(payload: ScanReq, db: Session = Depends(get_db)):
+    ch = payload.channel.strip()
+    if not ch:
+        raise HTTPException(400, "channel is required")
 
-    targets: list[tuple[str, str]] = []
-    if payload.include_shorts:
-        targets.append(("shorts", base + "/shorts"))
-    if payload.include_videos:
-        targets.append(("videos", base + "/videos"))
-    if payload.include_streams:
-        targets.append(("streams", base + "/streams"))
+    requested = int(payload.max_items or 0)
 
-    if not targets:
-        raise HTTPException(400, "select at least one of include_shorts/include_videos/include_streams")
+    # 0 代表全抓（但最多 SCAN_CAP）
+    if requested <= 0:
+        effective = SCAN_CAP
+    else:
+        effective = min(requested, SCAN_CAP)
 
-    inserted = 0
-    updated = 0
-    counts = {"shorts": 0, "videos": 0, "streams": 0}
-    seen_ids: set[str] = set()
-
-    for label, url in targets:
-        entries = fetch_flat_entries(url, payload.max_items)
-
-        # ✅ 強制 max 生效（就算 yt-dlp 多回傳也只取前 max）
-        entries = entries[: payload.max_items]
-        counts[label] = len(entries)
-
-        for e in entries:
-            vid = e.get("id")
-            vurl = e.get("url") or e.get("webpage_url")
-            if not vid or not vurl or vid in seen_ids:
-                continue
-            seen_ids.add(vid)
-
-            info = fetch_detail(vurl)
-            if not info or not info.get("id"):
-                continue
-
-            existed = db.get(Video, info["id"]) is not None
-            upsert_video(db, info)
-            if existed:
-                updated += 1
-            else:
-                inserted += 1
-
+    scan_id = str(uuid4())
+    job = ScanJob(
+        scan_id=scan_id,
+        channel=ch,
+        include_shorts=payload.include_shorts,
+        include_videos=payload.include_videos,
+        include_streams=payload.include_streams,
+        max_items=effective,
+        status="queued",
+        progress=0,
+        counts={},
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(job)
     db.commit()
 
+    scan_queue.enqueue(scan_task, scan_id, job_id=scan_id)
+
+    # ✅ 直接把有效值回給前端/你自己 debug
     return {
-        "channel": handle,
-        "max_items": payload.max_items,
-        "counts": counts,          # ✅ 每個 tab 真正抓到幾支（最重要）
-        "unique_videos": len(seen_ids),
-        "inserted": inserted,
-        "updated": updated,
+        "scan_id": scan_id,
+        "status": "queued",
+        "requested_max_items": requested,
+        "effective_max_items": effective,
+        "cap": SCAN_CAP,
+    }
+@router.get("/scan/{scan_id}")
+def get_scan(scan_id: str, db: Session = Depends(get_db)):
+    job = db.get(ScanJob, scan_id)
+    if not job:
+        raise HTTPException(404, "scan job not found")
+    return {
+        "scan_id": job.scan_id,
+        "channel": job.channel,
+        "status": job.status,
+        "progress": job.progress,
+        "counts": job.counts,
+        "unique_videos": job.unique_videos,
+        "inserted": job.inserted,
+        "updated": job.updated,
+        "error_message": job.error_message,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
     }
