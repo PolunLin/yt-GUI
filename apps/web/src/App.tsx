@@ -25,7 +25,11 @@ type DownloadJob = {
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
     ...init,
-    headers: { "Content-Type":"application/json", "X-API-Key": import.meta.env.VITE_API_KEY, ...(init?.headers||{}) },
+    headers: {
+  "Content-Type": "application/json",
+  "X-API-Key": import.meta.env.VITE_API_KEY,
+  ...(init?.headers || {}),
+},
   });
   if (!res.ok) {
     const txt = await res.text();
@@ -147,10 +151,31 @@ async function syncJobsForVideos(vs: Video[]) {
     if (job.status === "queued" || job.status === "running") pollJob(job.video_id, job.job_id);
   });
 }
-function downloadFile(jobId: string) {
-  window.open(`/api/downloads/${jobId}/file`, "_blank");
-}
+async function downloadFile(jobId: string, videoId: string) {
+  const key = import.meta.env.VITE_API_KEY;
+  if (!key) throw new Error("Missing VITE_API_KEY");
 
+  const res = await fetch(`/api/downloads/${jobId}/file`, {
+    headers: { "X-API-Key": key },
+  });
+
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`${res.status} ${res.statusText}: ${txt}`);
+  }
+
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${videoId}.mp4`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  URL.revokeObjectURL(url);
+}
   return (
     <div style={{ fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", padding: 16, maxWidth: 1100, margin: "0 auto" }}>
       <h2 style={{ margin: "8px 0 16px" }}>YT GUI</h2>
@@ -225,7 +250,7 @@ function downloadFile(jobId: string) {
         </span>
 
         {jobs[v.video_id].status === "success" ? (
-          <button onClick={() => downloadFile(jobs[v.video_id].job_id)}>Get File</button>
+          <button onClick={() => downloadFile(jobs[v.video_id].job_id, v.video_id)}>Get File</button>
         ) : null}
 
         {jobs[v.video_id].status === "failed" && jobs[v.video_id].error_message ? (
