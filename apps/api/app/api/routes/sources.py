@@ -42,6 +42,8 @@ def normalize_channel_to_handle(channel: str) -> str:
 
 
 def fetch_flat_entries(list_url: str, max_items: int) -> list[dict]:
+    max_items = max(1, int(max_items))
+
     opts = {
         "quiet": True,
         "skip_download": True,
@@ -51,7 +53,8 @@ def fetch_flat_entries(list_url: str, max_items: int) -> list[dict]:
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         data = ydl.extract_info(list_url, download=False)
-        return data.get("entries", []) if data else []
+        entries = data.get("entries", []) if data else []
+        return entries[:max_items]   # ✅ 強制截斷（最重要）
 
 
 def fetch_detail(video_url: str) -> Optional[dict]:
