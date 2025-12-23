@@ -45,6 +45,12 @@ export default function App() {
   const [minViews, setMinViews] = useState("");
   const [maxDuration, setMaxDuration] = useState("");
 
+  // scan channel
+  const [channel, setChannel] = useState("");
+  const [scanShorts, setScanShorts] = useState(true);
+  const [scanVideos, setScanVideos] = useState(true);
+  const [scanStreams, setScanStreams] = useState(false);
+  const [scanMaxItems, setScanMaxItems] = useState("30");
   // add-by-url
   const [url, setUrl] = useState("");
 
@@ -96,7 +102,29 @@ await syncJobsForVideos(data);
       setErr(e.message || String(e));
     }
   }
+  async function scanChannel() {
+    setErr(null);
+    const ch = channel.trim();
+    if (!ch) return;
 
+    try {
+      await api(`/sources/scan`, {
+        method: "POST",
+        body: JSON.stringify({
+          channel: ch,
+          include_shorts: scanShorts,
+          include_videos: scanVideos,
+          include_streams: scanStreams,
+          max_items: Number(scanMaxItems || "30"),
+        }),
+      });
+
+      // ✅ 掃完自動切到 shorts（不直接呼叫 loadVideos，讓 useEffect 接手）
+      setIsShort("1");
+    } catch (e: any) {
+      setErr(e.message || String(e));
+    }
+  }
   async function startDownload(video: Video) {
     setErr(null);
     try {
@@ -192,7 +220,42 @@ async function downloadFile(jobId: string, videoId: string) {
         <button style={{ padding: "10px 14px" }} onClick={addByUrl}>Add</button>
         <button style={{ padding: "10px 14px" }} onClick={loadVideos}>Refresh</button>
       </div>
+      {/* Scan Channel */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
+        <input
+          style={{ flex: 1, minWidth: 240, padding: 10 }}
+          placeholder="輸入 channel：InnahBee / @InnahBee / https://youtube.com/@InnahBee"
+          value={channel}
+          onChange={(e) => setChannel(e.target.value)}
+          onKeyDown={(e) => (e.key === "Enter" ? scanChannel() : null)}
+        />
 
+        <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <input type="checkbox" checked={scanShorts} onChange={(e) => setScanShorts(e.target.checked)} />
+          Shorts
+        </label>
+
+        <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <input type="checkbox" checked={scanVideos} onChange={(e) => setScanVideos(e.target.checked)} />
+          Videos
+        </label>
+
+        <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <input type="checkbox" checked={scanStreams} onChange={(e) => setScanStreams(e.target.checked)} />
+          Streams
+        </label>
+
+        <input
+          style={{ width: 90, padding: 10 }}
+          placeholder="max"
+          value={scanMaxItems}
+          onChange={(e) => setScanMaxItems(e.target.value)}
+        />
+
+        <button style={{ padding: "10px 14px" }} onClick={scanChannel}>
+          Scan
+        </button>
+      </div>
       {/* Filters */}
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
         <input style={{ padding: 10 }} placeholder="搜尋 title/uploader（q）" value={q} onChange={(e) => setQ(e.target.value)} />

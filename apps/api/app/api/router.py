@@ -5,7 +5,7 @@ from apps.api.app.api.routes.health import router as health_router
 from apps.api.app.api.routes.videos import router as videos_router
 from apps.api.app.api.routes.downloads import router as downloads_router
 from apps.api.app.api.routes.me import router as me_router
-
+from apps.api.app.api.routes.sources import router as sources_router
 api_router = APIRouter()
 
 # health 不上鎖
@@ -20,4 +20,13 @@ api_router.include_router(
 )
 api_router.include_router(
     me_router, prefix="/me", tags=["auth"], dependencies=[Depends(require_api_key)]
+)
+
+
+
+api_router.include_router(
+    sources_router,
+    prefix="/sources",
+    tags=["sources"],
+    dependencies=[Depends(require_api_key)],
 )
