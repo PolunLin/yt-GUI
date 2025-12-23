@@ -22,6 +22,23 @@ type DownloadJob = {
   finished_at?: string | null;
 };
 
+type ScanJob = {
+  scan_id: string;
+  channel: string;
+  status: "queued" | "running" | "success" | "failed";
+  progress: number;
+  max_items: number;
+  counts?: Record<string, number>;
+  unique_videos?: number;
+  inserted?: number;
+  updated?: number;
+  error_message?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
     ...init,
@@ -58,6 +75,10 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+
+  const [scanJobs, setScanJobs] = useState<ScanJob[]>([]);
+  const [scanLoading, setScanLoading] = useState(false);
+
   // 下載 jobs：用 video_id 當 key
   const [jobs, setJobs] = useState<Record<string, DownloadJob>>({});
 
@@ -89,7 +110,10 @@ await syncJobsForVideos(data);
     loadVideos();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queryString]);
-
+useEffect(() => {
+  loadScanJobs();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, []);
   async function addByUrl() {
     setErr(null);
     const u = url.trim();
@@ -164,6 +188,15 @@ await syncJobsForVideos(data);
     };
     tick();
   }
+  async function loadScanJobs() {
+  setScanLoading(true);
+  try {
+    const data = await api<ScanJob[]>(`/sources/scans?limit=50`);
+    setScanJobs(data);
+  } finally {
+    setScanLoading(false);
+  }
+}
 
 async function syncJobsForVideos(vs: Video[]) {
   const ids = vs.map(v => v.video_id);
@@ -279,7 +312,64 @@ async function downloadFile(jobId: string, videoId: string) {
       )}
 
       {loading ? <div>Loading...</div> : null}
+<div style={{ margin: "16px 0", padding: 12, border: "1px solid #eee", borderRadius: 8 }}>
+  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+    <div style={{ fontWeight: 700 }}>Scan Jobs</div>
+    <button onClick={loadScanJobs} disabled={scanLoading}>
+      {scanLoading ? "Refreshing..." : "Refresh Scan Jobs"}
+    </button>
+  </div>
 
+  <div style={{ marginTop: 10, overflowX: "auto" }}>
+    <table width="100%" cellPadding={8} style={{ borderCollapse: "collapse" }}>
+      <thead>
+        <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
+          <th>Time</th>
+          <th>Channel</th>
+          <th>Status</th>
+          <th>Progress</th>
+          <th>Counts</th>
+          <th>Result</th>
+        </tr>
+      </thead>
+      <tbody>
+        {scanJobs.map((j) => (
+          <tr key={j.scan_id} style={{ borderBottom: "1px solid #f0f0f0" }}>
+            <td style={{ fontSize: 12, opacity: 0.8 }}>{j.created_at?.slice(0, 19) ?? "-"}</td>
+            <td style={{ fontSize: 12 }}>
+              <div style={{ fontWeight: 600 }}>{j.channel}</div>
+              <div style={{ opacity: 0.7 }}>{j.scan_id}</div>
+            </td>
+            <td>{j.status}</td>
+            <td>
+              {j.progress}%
+              <div style={{ height: 6, background: "#eee", borderRadius: 4, marginTop: 6 }}>
+                <div style={{ width: `${j.progress}%`, height: 6, background: "#111", borderRadius: 4 }} />
+              </div>
+            </td>
+            <td style={{ fontSize: 12 }}>
+              shorts: {j.counts?.shorts ?? "-"} / videos: {j.counts?.videos ?? "-"} / streams: {j.counts?.streams ?? "-"}
+              <div style={{ opacity: 0.7 }}>max_items: {j.max_items}</div>
+            </td>
+            <td style={{ fontSize: 12 }}>
+              unique: {j.unique_videos ?? "-"} / ins: {j.inserted ?? "-"} / upd: {j.updated ?? "-"}
+              {j.status === "failed" && j.error_message ? (
+                <div style={{ color: "#b00020", marginTop: 6, whiteSpace: "pre-wrap" }}>{j.error_message}</div>
+              ) : null}
+            </td>
+          </tr>
+        ))}
+        {scanJobs.length === 0 ? (
+          <tr>
+            <td colSpan={6} style={{ padding: 12, opacity: 0.7 }}>
+              No scan jobs
+            </td>
+          </tr>
+        ) : null}
+      </tbody>
+    </table>
+  </div>
+</div>
       {/* Table */}
       <table width="100%" cellPadding={10} style={{ borderCollapse: "collapse" }}>
         <thead>

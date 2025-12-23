@@ -183,3 +183,47 @@ def get_scan(scan_id: str, db: Session = Depends(get_db)):
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
+    
+from typing import Optional
+from fastapi import Query
+from sqlalchemy import select
+
+@router.get("/scans")
+def list_scans(
+    status: Optional[str] = Query(default=None, description="queued|running|success|failed"),
+    q: Optional[str] = Query(default=None, description="search in channel"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    stmt = select(ScanJob)
+
+    if status:
+        stmt = stmt.where(ScanJob.status == status)
+
+    if q and q.strip():
+        stmt = stmt.where(ScanJob.channel.ilike(f"%{q.strip()}%"))
+
+    stmt = stmt.order_by(ScanJob.created_at.desc()).limit(limit).offset(offset)
+
+    rows = db.execute(stmt).scalars().all()
+
+    return [
+        {
+            "scan_id": j.scan_id,
+            "channel": j.channel,
+            "status": j.status,
+            "progress": j.progress,
+            "counts": j.counts,
+            "unique_videos": j.unique_videos,
+            "inserted": j.inserted,
+            "updated": j.updated,
+            "error_message": j.error_message,
+            "max_items": j.max_items,
+            "started_at": j.started_at,
+            "finished_at": j.finished_at,
+            "created_at": j.created_at,
+            "updated_at": j.updated_at,
+        }
+        for j in rows
+    ]
