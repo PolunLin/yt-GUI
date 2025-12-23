@@ -43,10 +43,10 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
     ...init,
     headers: {
-  "Content-Type": "application/json",
-  "X-API-Key": import.meta.env.VITE_API_KEY,
-  ...(init?.headers || {}),
-},
+      "Content-Type": "application/json",
+      "X-API-Key": import.meta.env.VITE_API_KEY,
+      ...(init?.headers || {}),
+    },
   });
   if (!res.ok) {
     const txt = await res.text();
@@ -82,6 +82,9 @@ export default function App() {
   // 下載 jobs：用 video_id 當 key
   const [jobs, setJobs] = useState<Record<string, DownloadJob>>({});
 
+  // pagination
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20); // 10/20/50 都可
   const queryString = useMemo(() => {
     const p = new URLSearchParams();
     if (q.trim()) p.set("q", q.trim());
@@ -91,14 +94,25 @@ export default function App() {
     const s = p.toString();
     return s ? `?${s}` : "";
   }, [q, isShort, minViews, maxDuration]);
+  const totalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(videos.length / pageSize));
+  }, [videos.length, pageSize]);
 
+  const pagedVideos = useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return videos.slice(start, start + pageSize);
+  }, [videos, page, pageSize]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
   async function loadVideos() {
     setErr(null);
     setLoading(true);
     try {
       const data = await api<Video[]>(`/videos${queryString}`);
       setVideos(data);
-await syncJobsForVideos(data);
+      await syncJobsForVideos(data);
     } catch (e: any) {
       setErr(e.message || String(e));
     } finally {
@@ -110,10 +124,10 @@ await syncJobsForVideos(data);
     loadVideos();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queryString]);
-useEffect(() => {
-  loadScanJobs();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, []);
+  useEffect(() => {
+    loadScanJobs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   async function addByUrl() {
     setErr(null);
     const u = url.trim();
@@ -132,17 +146,17 @@ useEffect(() => {
     if (!ch) return;
 
     try {
-      
-    await api(`/sources/scan`, {
-      method: "POST",
-      body: JSON.stringify({
-        channel: ch,
-        include_shorts: scanShorts,
-        include_videos: scanVideos,
-        include_streams: scanStreams,
-        max_items: Number(maxItems), // ✅,
-      }),
-    });
+
+      await api(`/sources/scan`, {
+        method: "POST",
+        body: JSON.stringify({
+          channel: ch,
+          include_shorts: scanShorts,
+          include_videos: scanVideos,
+          include_streams: scanStreams,
+          max_items: Number(maxItems), // ✅,
+        }),
+      });
 
       // ✅ 掃完自動切到 shorts（不直接呼叫 loadVideos，讓 useEffect 接手）
       setIsShort("1");
@@ -171,7 +185,41 @@ useEffect(() => {
       setErr(e.message || String(e));
     }
   }
+  const [bulkDownloading, setBulkDownloading] = useState(false);
 
+  async function bulkEnqueueDownloads(target: Video[], concurrency = 3) {
+    setErr(null);
+    setBulkDownloading(true);
+
+    // 小工具：限制併發，避免一次打爆 API / RQ
+    const runPool = async <T,>(items: T[], worker: (item: T) => Promise<void>) => {
+      const q = [...items];
+      const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+        while (q.length) {
+          const item = q.shift()!;
+          await worker(item);
+        }
+      });
+      await Promise.all(runners);
+    };
+
+    try {
+      await runPool(target, async (v) => {
+        // 只 enqueue，不要每支都 poll（避免 timer 爆炸）
+        await api(`/downloads`, {
+          method: "POST",
+          body: JSON.stringify({ video_id: v.video_id }),
+        });
+      });
+
+      // enqueue 完後：同步 jobs + 讓 queued/running 自己輪詢
+      await syncJobsForVideos(videos);
+    } catch (e: any) {
+      setErr(e.message || String(e));
+    } finally {
+      setBulkDownloading(false);
+    }
+  }
   async function pollJob(videoId: string, jobId: string) {
     // 簡單輪詢：每 1 秒抓一次，直到 success/failed
     const tick = async () => {
@@ -189,55 +237,55 @@ useEffect(() => {
     tick();
   }
   async function loadScanJobs() {
-  setScanLoading(true);
-  try {
-    const data = await api<ScanJob[]>(`/sources/scans?limit=50`);
-    setScanJobs(data);
-  } finally {
-    setScanLoading(false);
-  }
-}
-
-async function syncJobsForVideos(vs: Video[]) {
-  const ids = vs.map(v => v.video_id);
-  const data = await api<DownloadJob[]>(`/downloads/by_videos`, {
-    method: "POST",
-    body: JSON.stringify({ video_ids: ids }),
-  });
-
-  const next: Record<string, DownloadJob> = {};
-  for (const j of data) next[j.video_id] = j;
-  setJobs(next);
-
-  Object.values(next).forEach((job) => {
-    if (job.status === "queued" || job.status === "running") pollJob(job.video_id, job.job_id);
-  });
-}
-async function downloadFile(jobId: string, videoId: string) {
-  const key = import.meta.env.VITE_API_KEY;
-  if (!key) throw new Error("Missing VITE_API_KEY");
-
-  const res = await fetch(`/api/downloads/${jobId}/file`, {
-    headers: { "X-API-Key": key },
-  });
-
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`${res.status} ${res.statusText}: ${txt}`);
+    setScanLoading(true);
+    try {
+      const data = await api<ScanJob[]>(`/sources/scans?limit=50`);
+      setScanJobs(data);
+    } finally {
+      setScanLoading(false);
+    }
   }
 
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
+  async function syncJobsForVideos(vs: Video[]) {
+    const ids = vs.map(v => v.video_id);
+    const data = await api<DownloadJob[]>(`/downloads/by_videos`, {
+      method: "POST",
+      body: JSON.stringify({ video_ids: ids }),
+    });
 
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${videoId}.mp4`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+    const next: Record<string, DownloadJob> = {};
+    for (const j of data) next[j.video_id] = j;
+    setJobs(next);
 
-  URL.revokeObjectURL(url);
-}
+    Object.values(next).forEach((job) => {
+      if (job.status === "queued" || job.status === "running") pollJob(job.video_id, job.job_id);
+    });
+  }
+  async function downloadFile(jobId: string, videoId: string) {
+    const key = import.meta.env.VITE_API_KEY;
+    if (!key) throw new Error("Missing VITE_API_KEY");
+
+    const res = await fetch(`/api/downloads/${jobId}/file`, {
+      headers: { "X-API-Key": key },
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(`${res.status} ${res.statusText}: ${txt}`);
+    }
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${videoId}.mp4`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    URL.revokeObjectURL(url);
+  }
   return (
     <div style={{ fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", padding: 16, maxWidth: 1100, margin: "0 auto" }}>
       <h2 style={{ margin: "8px 0 16px" }}>YT GUI</h2>
@@ -279,7 +327,7 @@ async function downloadFile(jobId: string, videoId: string) {
           Streams
         </label>
 
-              
+
 
         <input
           type="number"
@@ -304,7 +352,25 @@ async function downloadFile(jobId: string, videoId: string) {
         <input style={{ padding: 10 }} placeholder="min_views" value={minViews} onChange={(e) => setMinViews(e.target.value)} />
         <input style={{ padding: 10 }} placeholder="max_duration" value={maxDuration} onChange={(e) => setMaxDuration(e.target.value)} />
       </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+        <button
+          disabled={bulkDownloading || pagedVideos.length === 0}
+          onClick={() => bulkEnqueueDownloads(pagedVideos, 3)}
+        >
+          {bulkDownloading ? "Enqueueing..." : `一鍵下載（本頁 ${pagedVideos.length} 筆）`}
+        </button>
 
+        <button
+          disabled={bulkDownloading || videos.length === 0}
+          onClick={() => bulkEnqueueDownloads(videos, 3)}
+        >
+          {bulkDownloading ? "Enqueueing..." : `一鍵下載（全部篩選結果 ${videos.length} 筆）`}
+        </button>
+
+        <span style={{ fontSize: 12, opacity: 0.75 }}>
+          ※ 這是「後台排隊下載」，完成後用 Get File 取檔
+        </span>
+      </div>
       {err && (
         <div style={{ background: "#ffecec", border: "1px solid #ffb3b3", padding: 10, marginBottom: 12, whiteSpace: "pre-wrap" }}>
           {err}
@@ -312,64 +378,82 @@ async function downloadFile(jobId: string, videoId: string) {
       )}
 
       {loading ? <div>Loading...</div> : null}
-<div style={{ margin: "16px 0", padding: 12, border: "1px solid #eee", borderRadius: 8 }}>
-  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-    <div style={{ fontWeight: 700 }}>Scan Jobs</div>
-    <button onClick={loadScanJobs} disabled={scanLoading}>
-      {scanLoading ? "Refreshing..." : "Refresh Scan Jobs"}
-    </button>
-  </div>
+      <div style={{ margin: "16px 0", padding: 12, border: "1px solid #eee", borderRadius: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ fontWeight: 700 }}>Scan Jobs</div>
+          <button onClick={loadScanJobs} disabled={scanLoading}>
+            {scanLoading ? "Refreshing..." : "Refresh Scan Jobs"}
+          </button>
+        </div>
 
-  <div style={{ marginTop: 10, overflowX: "auto" }}>
-    <table width="100%" cellPadding={8} style={{ borderCollapse: "collapse" }}>
-      <thead>
-        <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
-          <th>Time</th>
-          <th>Channel</th>
-          <th>Status</th>
-          <th>Progress</th>
-          <th>Counts</th>
-          <th>Result</th>
-        </tr>
-      </thead>
-      <tbody>
-        {scanJobs.map((j) => (
-          <tr key={j.scan_id} style={{ borderBottom: "1px solid #f0f0f0" }}>
-            <td style={{ fontSize: 12, opacity: 0.8 }}>{j.created_at?.slice(0, 19) ?? "-"}</td>
-            <td style={{ fontSize: 12 }}>
-              <div style={{ fontWeight: 600 }}>{j.channel}</div>
-              <div style={{ opacity: 0.7 }}>{j.scan_id}</div>
-            </td>
-            <td>{j.status}</td>
-            <td>
-              {j.progress}%
-              <div style={{ height: 6, background: "#eee", borderRadius: 4, marginTop: 6 }}>
-                <div style={{ width: `${j.progress}%`, height: 6, background: "#111", borderRadius: 4 }} />
-              </div>
-            </td>
-            <td style={{ fontSize: 12 }}>
-              shorts: {j.counts?.shorts ?? "-"} / videos: {j.counts?.videos ?? "-"} / streams: {j.counts?.streams ?? "-"}
-              <div style={{ opacity: 0.7 }}>max_items: {j.max_items}</div>
-            </td>
-            <td style={{ fontSize: 12 }}>
-              unique: {j.unique_videos ?? "-"} / ins: {j.inserted ?? "-"} / upd: {j.updated ?? "-"}
-              {j.status === "failed" && j.error_message ? (
-                <div style={{ color: "#b00020", marginTop: 6, whiteSpace: "pre-wrap" }}>{j.error_message}</div>
+        <div style={{ marginTop: 10, overflowX: "auto" }}>
+          <table width="100%" cellPadding={8} style={{ borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>
+                <th>Time</th>
+                <th>Channel</th>
+                <th>Status</th>
+                <th>Progress</th>
+                <th>Counts</th>
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody>
+              {scanJobs.map((j) => (
+                <tr key={j.scan_id} style={{ borderBottom: "1px solid #f0f0f0" }}>
+                  <td style={{ fontSize: 12, opacity: 0.8 }}>{j.created_at?.slice(0, 19) ?? "-"}</td>
+                  <td style={{ fontSize: 12 }}>
+                    <div style={{ fontWeight: 600 }}>{j.channel}</div>
+                    <div style={{ opacity: 0.7 }}>{j.scan_id}</div>
+                  </td>
+                  <td>{j.status}</td>
+                  <td>
+                    {j.progress}%
+                    <div style={{ height: 6, background: "#eee", borderRadius: 4, marginTop: 6 }}>
+                      <div style={{ width: `${j.progress}%`, height: 6, background: "#111", borderRadius: 4 }} />
+                    </div>
+                  </td>
+                  <td style={{ fontSize: 12 }}>
+                    shorts: {j.counts?.shorts ?? "-"} / videos: {j.counts?.videos ?? "-"} / streams: {j.counts?.streams ?? "-"}
+                    <div style={{ opacity: 0.7 }}>max_items: {j.max_items}</div>
+                  </td>
+                  <td style={{ fontSize: 12 }}>
+                    unique: {j.unique_videos ?? "-"} / ins: {j.inserted ?? "-"} / upd: {j.updated ?? "-"}
+                    {j.status === "failed" && j.error_message ? (
+                      <div style={{ color: "#b00020", marginTop: 6, whiteSpace: "pre-wrap" }}>{j.error_message}</div>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+              {scanJobs.length === 0 ? (
+                <tr>
+                  <td colSpan={6} style={{ padding: 12, opacity: 0.7 }}>
+                    No scan jobs
+                  </td>
+                </tr>
               ) : null}
-            </td>
-          </tr>
-        ))}
-        {scanJobs.length === 0 ? (
-          <tr>
-            <td colSpan={6} style={{ padding: 12, opacity: 0.7 }}>
-              No scan jobs
-            </td>
-          </tr>
-        ) : null}
-      </tbody>
-    </table>
-  </div>
-</div>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "8px 0 10px", gap: 8 }}>
+        <div style={{ fontSize: 12, opacity: 0.8 }}>
+          共 {videos.length} 筆｜第 {page} / {totalPages} 頁
+        </div>
+
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}>
+            <option value={10}>10 /頁</option>
+            <option value={20}>20 /頁</option>
+            <option value={50}>50 /頁</option>
+          </select>
+
+          <button disabled={page <= 1} onClick={() => setPage(1)}>⏮</button>
+          <button disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>◀</button>
+          <button disabled={page >= totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>▶</button>
+          <button disabled={page >= totalPages} onClick={() => setPage(totalPages)}>⏭</button>
+        </div>
+      </div>
       {/* Table */}
       <table width="100%" cellPadding={10} style={{ borderCollapse: "collapse" }}>
         <thead>
@@ -382,7 +466,7 @@ async function downloadFile(jobId: string, videoId: string) {
           </tr>
         </thead>
         <tbody>
-          {videos.map((v) => {
+          {pagedVideos.map((v) => {
             return (
               <tr key={v.video_id} style={{ borderBottom: "1px solid #f0f0f0", verticalAlign: "top" }}>
                 <td>
@@ -395,28 +479,28 @@ async function downloadFile(jobId: string, videoId: string) {
                 <td>{v.view_count ?? "-"}</td>
                 <td>{v.duration ?? "-"}</td>
                 <td>
-  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-    <button onClick={() => startDownload(v)}>
-      {jobs[v.video_id]?.status === "success" ? "Re-check" : "Download"}
-    </button>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <button onClick={() => startDownload(v)}>
+                      {jobs[v.video_id]?.status === "success" ? "Re-check" : "Download"}
+                    </button>
 
-    {jobs[v.video_id] ? (
-      <>
-        <span style={{ fontSize: 12, opacity: 0.8 }}>
-          {jobs[v.video_id].status} ({jobs[v.video_id].progress}%)
-        </span>
+                    {jobs[v.video_id] ? (
+                      <>
+                        <span style={{ fontSize: 12, opacity: 0.8 }}>
+                          {jobs[v.video_id].status} ({jobs[v.video_id].progress}%)
+                        </span>
 
-        {jobs[v.video_id].status === "success" ? (
-          <button onClick={() => downloadFile(jobs[v.video_id].job_id, v.video_id)}>Get File</button>
-        ) : null}
+                        {jobs[v.video_id].status === "success" ? (
+                          <button onClick={() => downloadFile(jobs[v.video_id].job_id, v.video_id)}>Get File</button>
+                        ) : null}
 
-        {jobs[v.video_id].status === "failed" && jobs[v.video_id].error_message ? (
-          <span style={{ color: "#b00020", fontSize: 12 }}>{jobs[v.video_id].error_message}</span>
-        ) : null}
-      </>
-    ) : null}
-  </div>
-</td>
+                        {jobs[v.video_id].status === "failed" && jobs[v.video_id].error_message ? (
+                          <span style={{ color: "#b00020", fontSize: 12 }}>{jobs[v.video_id].error_message}</span>
+                        ) : null}
+                      </>
+                    ) : null}
+                  </div>
+                </td>
               </tr>
             );
           })}
