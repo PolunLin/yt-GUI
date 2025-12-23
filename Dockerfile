@@ -4,7 +4,7 @@ WORKDIR /app
 
 # 系統依賴：yt-dlp 合併 mp4 需要 ffmpeg；psycopg 連線常需要 libpq
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg libpq5 \
+    ffmpeg libpq5 nodejs\
     && rm -rf /var/lib/apt/lists/*
 
 # 1) 固定 uv 版本（正常專案會 pin；不要每次 build 裝到不同 uv）
