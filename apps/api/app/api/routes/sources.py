@@ -50,23 +50,29 @@ def fetch_flat_entries(list_url: str, max_items: int) -> list[dict]:
         "extract_flat": True,
         "ignoreerrors": True,
         "playlistend": max_items,
+        "js_runtimes": {"node": {}},
+        "remote_components": ["ejs:github"],
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         data = ydl.extract_info(list_url, download=False)
         entries = data.get("entries", []) if data else []
-        return entries[:max_items]   # ✅ 強制截斷（最重要）
+        return entries[:max_items]
 
 
-def fetch_detail(video_url: str) -> Optional[dict]:
+def fetch_detail(video_url: str):
     opts = {
         "quiet": True,
         "skip_download": True,
         "ignoreerrors": True,
         "retries": 3,
+        "js_runtimes": {"node": {}},
+        "remote_components": ["ejs:github"],
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(video_url, download=False)
-        return info
+        try:
+            return ydl.extract_info(video_url, download=False)
+        except Exception:
+            return None
 
 
 def upsert_video(db: Session, info: dict):
@@ -110,10 +116,16 @@ def scan_channel(payload: ScanChannelReq, db: Session = Depends(get_db)):
 
     inserted = 0
     updated = 0
+    counts = {"shorts": 0, "videos": 0, "streams": 0}
     seen_ids: set[str] = set()
 
     for label, url in targets:
         entries = fetch_flat_entries(url, payload.max_items)
+
+        # ✅ 強制 max 生效（就算 yt-dlp 多回傳也只取前 max）
+        entries = entries[: payload.max_items]
+        counts[label] = len(entries)
+
         for e in entries:
             vid = e.get("id")
             vurl = e.get("url") or e.get("webpage_url")
@@ -136,7 +148,9 @@ def scan_channel(payload: ScanChannelReq, db: Session = Depends(get_db)):
 
     return {
         "channel": handle,
-        "scanned": len(seen_ids),
+        "max_items": payload.max_items,
+        "counts": counts,          # ✅ 每個 tab 真正抓到幾支（最重要）
+        "unique_videos": len(seen_ids),
         "inserted": inserted,
         "updated": updated,
     }
